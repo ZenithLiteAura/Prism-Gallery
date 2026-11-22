@@ -62,6 +62,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -69,6 +70,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -85,6 +87,7 @@ import com.example.amoledgallery.ui.components.FastScroller
 import com.example.amoledgallery.ui.components.FilterChips
 import com.example.amoledgallery.ui.components.LargeHeader
 import com.example.amoledgallery.ui.components.MediaGridItem
+import com.example.amoledgallery.ui.components.GridScrollbar
 import com.example.amoledgallery.ui.components.detectPinchToZoomGrid
 import com.example.amoledgallery.ui.components.SelectionTopBar
 import com.example.amoledgallery.ui.components.OneUiSelectAll
@@ -216,6 +219,13 @@ fun GalleryScreen(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
+        // 大图退出后要滚回刚才看的那张：这两个状态放在 Box 作用域，网格和大图都能用。
+        val detailIndexHolder = remember { IntArray(1) }
+        selectedDetailIndex?.let { detailIndexHolder[0] = it }
+        // 下拉松手关闭时，缩放动画从这里记录的当前变换继续（由 MediaDetailScreen 写入）。
+        var pendingZoomStart by remember { mutableStateOf<FloatArray?>(null) }
+        // 关闭时缩放动画落点：当前这张缩略图的实际位置（内部作用域里赋值）。
+        val closeBoundsAction = remember { androidx.compose.runtime.mutableStateOf<(() -> Rect?)?>(null) }
         if (isLoading) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -296,6 +306,7 @@ fun GalleryScreen(
             val gridState = remember(isIos) {
                 LazyGridState(firstVisibleItemIndex = if (isIos) displayItems.size else 0)
             }
+            var gridOriginRoot by remember { mutableStateOf(Offset.Zero) }
             val coroutineScope = rememberCoroutineScope()
             val density = LocalDensity.current
 
@@ -364,6 +375,7 @@ fun GalleryScreen(
                 viewMenuOpen = true
             }
 
+            // 退出大图后，网格滚到刚才看的那张，而不是回到原来的位置。
             HazeSource(
                 gridHaze,
                 Modifier
@@ -375,9 +387,10 @@ fun GalleryScreen(
                     state = gridState,
                     modifier = Modifier
                         .fillMaxSize()
+                        .onGloballyPositioned { gridOriginRoot = it.positionInRoot() }
                         .detectPinchToZoomGrid(
-                            onZoomIn = onZoomIn,
-                            onZoomOut = onZoomOut
+                            onZoomIn = { onZoomIn() },
+                            onZoomOut = { onZoomOut() }
                         )
                         .detectDragSelect(
                             items = displayItems,
@@ -642,16 +655,52 @@ fun GalleryScreen(
                         .padding(top = statusBarTop + 80.dp, bottom = bottomPadding)
                 )
             }
+            // 关闭时缩放动画的落点：当前正在看的那张缩略图的实际屏幕位置。
+            closeBoundsAction.value = {
+                val idx = detailIndexHolder[0]
+                val item = displayItems.getOrNull(idx)
+                val li = gridState.layoutInfo
+                val info = item?.let { media -> li.visibleItemsInfo.firstOrNull { it.key == media.id } }
+                if (info == null) null else Rect(
+                    gridOriginRoot + Offset(info.offset.x.toFloat(), info.offset.y.toFloat() - li.viewportStartOffset),
+                    androidx.compose.ui.geometry.Size(info.size.width.toFloat(), info.size.height.toFloat())
+                )
+            }
+            // 大图里每翻一张，网格就跟着滚一点：退出的缩放动画正好落在那张缩略图上。
+            // 刚点开的那一下不要滚（照片本来就在屏幕上），否则打开动画期间网格会突然跳一下。
+            var lastSyncIndex by remember { mutableStateOf(-1) }
+            LaunchedEffect(selectedDetailIndex) {
+                val idx = selectedDetailIndex
+                if (idx == null) { lastSyncIndex = -1; return@LaunchedEffect }
+                if (lastSyncIndex == -1) { lastSyncIndex = idx; return@LaunchedEffect }
+                if (idx == lastSyncIndex) return@LaunchedEffect
+                lastSyncIndex = idx
+                if (displayItems.isEmpty()) return@LaunchedEffect
+                var gridIndex = 1 // 顶部标题占一项
+                var remaining = idx
+                for (section in dateSections) {
+                    if (section.title.isNotEmpty()) gridIndex++
+                    if (remaining < section.items.size) {
+                        gridIndex += remaining
+                        break
+                    }
+                    remaining -= section.items.size
+                    gridIndex += section.items.size
+                }
+                val anchor = (gridIndex - columnCount * 2).coerceAtLeast(0)
+                val last = (gridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                gridState.scrollToItem(anchor.coerceIn(0, last))
+            }
         }
 
         // FULLSCREEN OVERLAY: Media Detail Viewer
         // Overlaid directly onto the LazyVerticalGrid without recreating GalleryScreen.
         // Preserves LazyGridState scroll position down to the exact pixel when dismissed!
-        val detailIndexHolder = remember { IntArray(1) }
-        selectedDetailIndex?.let { detailIndexHolder[0] = it }
         MediaZoomTransition(
             visible = selectedDetailIndex != null,
-            onCoveringChange = { gridCoveredByViewer = it }
+            onCoveringChange = { gridCoveredByViewer = it },
+            closeBounds = { closeBoundsAction.value?.invoke() },
+            closeStart = { pendingZoomStart.also { pendingZoomStart = null } }
         ) {
                 MediaDetailScreen(
                     mediaList = displayItems,
@@ -661,7 +710,11 @@ fun GalleryScreen(
                     onRenameItem = onRenameItem,
                     isFavorite = isFavorite,
                     onToggleFavorite = onToggleFavorite,
-                    onPageChanged = onDetailIndexChanged
+                    onPageChanged = onDetailIndexChanged,
+                    onZoomDismiss = { s, tx, ty ->
+                        pendingZoomStart = floatArrayOf(s, tx, ty)
+                        onCloseDetail()
+                    }
                 )
         }
     }

@@ -433,6 +433,16 @@ fun MediaZoomTransition(
      * underneath (it was otherwise rendered behind the opaque viewer on every frame).
      */
     onCoveringChange: ((Boolean) -> Unit)? = null,
+    /**
+     * While closing: where the viewer should shrink back into. Callers pass the tile of the photo
+     * being shown right now, so swiping through the viewer still lands on the right thumbnail.
+     */
+    closeBounds: (() -> Rect?)? = null,
+    /**
+     * For a close that starts mid-gesture: [scale, offsetX, offsetY] of the viewer's current transform,
+     * so the shrink continues from where the finger left it instead of jumping back to full screen.
+     */
+    closeStart: (() -> FloatArray?)? = null,
     content: @Composable () -> Unit
 ) {
     val theme = LocalAppTheme.current
@@ -458,11 +468,16 @@ fun MediaZoomTransition(
     if (!visible && !stillAnimating) return
 
     val tileCornerPx = with(LocalDensity.current) { theme.shapes.gridItemCornerRadius.toPx() }
-    val bounds = boundsHolder[0]
+    val capturedBounds = boundsHolder[0]
+    // The mid-gesture start of a closing animation is read once, on its first frame.
+    val closeStartHolder = remember { arrayOfNulls<FloatArray>(1) }
+    if (visible) closeStartHolder[0] = null
+    val start = if (visible) null else (closeStartHolder[0] ?: closeStart?.invoke()?.also { closeStartHolder[0] = it })
     Box(
         modifier = Modifier
             .fillMaxSize()
             .graphicsLayer {
+                val bounds = (if (!visible) closeBounds?.invoke() else null) ?: capturedBounds
                 val p = progress.value
                 if (bounds == null || size.width <= 0f || size.height <= 0f) {
                     alpha = p.coerceIn(0f, 1f)
@@ -472,6 +487,23 @@ fun MediaZoomTransition(
                     return@graphicsLayer
                 }
                 val startScale = (bounds.width / size.width).coerceIn(0.05f, 1f)
+                if (start != null) {
+                    // 从手指松开时的位置继续缩向缩略图。
+                    val q = (1f - p).coerceIn(0f, 1f)
+                    val s0 = start.getOrElse(0) { 1f }
+                    val tx0 = start.getOrElse(1) { 0f }
+                    val ty0 = start.getOrElse(2) { 0f }
+                    val s = s0 + (startScale - s0) * q
+                    scaleX = s
+                    scaleY = s
+                    translationX = tx0 + ((bounds.center.x - size.width / 2f) - tx0) * q
+                    translationY = ty0 + ((bounds.center.y - size.height / 2f) - ty0) * q
+                    clip = false
+                    shape = androidx.compose.ui.graphics.RectangleShape
+                    // 随着缩小逐渐淡出，让下面的网格透出来。
+                    alpha = (1f - q).coerceIn(0f, 1f)
+                    return@graphicsLayer
+                }
                 val s = startScale + (1f - startScale) * p
                 scaleX = s
                 scaleY = s

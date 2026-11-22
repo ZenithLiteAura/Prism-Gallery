@@ -5,6 +5,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 
 /**
@@ -14,14 +15,15 @@ import androidx.compose.ui.input.pointer.pointerInput
  * Two-finger pinch gestures accumulate scale:
  * - Spreading fingers (pinch-out) -> triggers [onZoomIn] (fewer, larger columns)
  * - Pinching fingers (pinch-in) -> triggers [onZoomOut] (more, compact columns)
+ * Both callbacks get the pinch centre (grid-local) so a page can zoom the part of the list under the fingers.
  *
  * The detector keeps running across recompositions, so it always calls the latest callbacks (a grid that
  * switches between the album list and an album's photos must zoom whichever is shown right now).
  */
 @Composable
 fun Modifier.detectPinchToZoomGrid(
-    onZoomIn: () -> Unit,
-    onZoomOut: () -> Unit
+    onZoomIn: (Offset) -> Unit,
+    onZoomOut: (Offset) -> Unit
 ): Modifier {
     val latestZoomIn = rememberUpdatedState(onZoomIn)
     val latestZoomOut = rememberUpdatedState(onZoomOut)
@@ -48,11 +50,12 @@ fun Modifier.detectPinchToZoomGrid(
                         accumulatedScale *= zoomRatio
 
                         // Sensitivity thresholds
+                        val focal = (p0 + p1) / 2f
                         if (accumulatedScale > 1.30f) {
-                            latestZoomIn.value()
+                            latestZoomIn.value(focal)
                             accumulatedScale = 1f
                         } else if (accumulatedScale < 0.70f) {
-                            latestZoomOut.value()
+                            latestZoomOut.value(focal)
                             accumulatedScale = 1f
                         }
                     }

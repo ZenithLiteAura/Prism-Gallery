@@ -179,6 +179,11 @@ fun MediaDetailScreen(
     isFavorite: (Long) -> Boolean = { false },
     onToggleFavorite: (Long) -> Unit = {},
     onPageChanged: (Int) -> Unit = {},
+    /**
+     * 下拉松手要关闭时：缩放动画从当前拖动位置继续缩向缩略图。
+     * 参数是 [scale, offsetX, offsetY]（查看器当前变换），由外层交给 MediaZoomTransition。
+     */
+    onZoomDismiss: ((Float, Float, Float) -> Unit)? = null,
     trashMode: Boolean = false,
     onRestoreItem: (MediaItem) -> Unit = {},
     onDeletePermanently: (MediaItem) -> Unit = {},
@@ -543,7 +548,30 @@ fun MediaDetailScreen(
                                 if (vertical) {
                                     val vy = if (multiTouch) 0f else velocity.calculateVelocity().y
                                     if (dismissing) {
-                                        if (dismissOffset > 170f || vy > 1800f) onBack() else settleDismiss()
+                                        if (dismissOffset > 170f || vy > 1800f) {
+                                            settleJob?.cancel()
+                                            val zoom = onZoomDismiss
+                                            if (zoom != null) {
+                                                // 从松手的位置继续缩向当前缩略图（不再先跳回中心）。
+                                                val h = viewerSize.height.toFloat().coerceAtLeast(1f)
+                                                val fraction = (dismissOffset / h).coerceIn(0f, 1f)
+                                                val s = 1f - fraction * dismissShrink
+                                                val offset = dismissOffset
+                                                dismissOffset = 0f
+                                                zoom(s, 0f, offset)
+                                            } else {
+                                                // 兜底：顺着手指方向滑出屏幕（没有缩略图目标时）。
+                                                settleJob = scope.launch {
+                                                    val target = (viewerSize.height.takeIf { it > 0 } ?: 3000).toFloat()
+                                                    animate(dismissOffset, target, animationSpec = tween(durationMillis = 170)) { v, _ ->
+                                                        dismissOffset = v
+                                                    }
+                                                    onBack()
+                                                }
+                                            }
+                                        } else {
+                                            settleDismiss()
+                                        }
                                     } else if (!(isIos && infoProgress >= 1f)) {
                                         // iOS: a panel that is fully open stays where it was pulled to.
                                         val target = when {

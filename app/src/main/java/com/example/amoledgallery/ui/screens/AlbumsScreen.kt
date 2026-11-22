@@ -116,6 +116,7 @@ import com.example.amoledgallery.ui.components.LargeHeader
 import com.example.amoledgallery.ui.components.MediaGridItem
 import com.example.amoledgallery.ui.components.SelectionTopBar
 import com.example.amoledgallery.ui.components.detectDragSelect
+import com.example.amoledgallery.ui.components.GridScrollbar
 import com.example.amoledgallery.ui.components.detectPinchToZoomGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.runtime.mutableLongStateOf
@@ -460,7 +461,16 @@ fun AlbumsScreen(
     var subMoved by remember { mutableStateOf(false) }
     var subLongPressAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
     val subTileBounds = remember { androidx.compose.runtime.mutableStateMapOf<String, Rect>() }
+    /** 子相册那几行在屏幕上的位置（root 坐标），双指缩放用它在两块区域之间判断。 */
+    var subAlbumsBoundsRoot by remember { mutableStateOf<Rect?>(null) }
     LaunchedEffect(albums) { if (draggedSubKey == null) arrangedSub = null }
+
+    /** 这一下双指缩放是否落在「子相册」那几行上（是就只改子相册大小）。
+     *  子相册现在是独立的一块（多行布局），用它在屏幕上的实际位置判断最稳。 */
+    fun pinchOverSubAlbums(pos: Offset): Boolean {
+        val bounds = subAlbumsBoundsRoot ?: return false
+        return bounds.contains(gridOriginInRoot + pos)
+    }
 
     /** What was typed into the search field, or null while it is closed or still empty. */
     val albumSearchTerm = albumSearchQuery.trim().takeIf { albumSearchOpen && it.isNotBlank() }
@@ -678,13 +688,24 @@ fun AlbumsScreen(
                         // One detector for both pages that decides on every pinch: inside an album it sizes the
                         // photos, on the album list the albums (not on iOS).
                         .detectPinchToZoomGrid(
-                            onZoomIn = {
-                                if (isInsideAlbum) onZoomIn()
-                                else if (gridOptions && rootColumns > 2) onSetAlbumColumns(rootColumns - 1)
+                            onZoomIn = { pos ->
+                                // 文件夹里：缩放在子相册磁贴上就只改子相册大小，在照片区域就只改照片大小。
+                                if (isInsideAlbum && pinchOverSubAlbums(pos)) {
+                                    if (subColumns > 2) onSetSubAlbumColumns(subColumns - 1)
+                                } else if (isInsideAlbum) {
+                                    onZoomIn()
+                                } else if (gridOptions && rootColumns > 2) {
+                                    onSetAlbumColumns(rootColumns - 1)
+                                }
                             },
-                            onZoomOut = {
-                                if (isInsideAlbum) onZoomOut()
-                                else if (gridOptions && rootColumns < 5) onSetAlbumColumns(rootColumns + 1)
+                            onZoomOut = { pos ->
+                                if (isInsideAlbum && pinchOverSubAlbums(pos)) {
+                                    if (subColumns < 5) onSetSubAlbumColumns(subColumns + 1)
+                                } else if (isInsideAlbum) {
+                                    onZoomOut()
+                                } else if (gridOptions && rootColumns < 5) {
+                                    onSetAlbumColumns(rootColumns + 1)
+                                }
                             }
                         )
                         .onGloballyPositioned { gridOriginInRoot = it.positionInRoot() }
@@ -1050,135 +1071,134 @@ fun AlbumsScreen(
                             item(span = { GridItemSpan(maxLineSpan) }, key = "sub_albums_title") {
                                 AlbumsSectionTitle(strings.subAlbums, albums.size, drawerShift.padding(horizontal = sectionInset))
                             }
-                            items(
-                                items = arrangedSub ?: albums,
-                                key = { it.bucketId }
-                            ) { subAlbum ->
-                                val subKey = subAlbum.bucketId
-                                val dragged = draggedSubKey == subKey
-                                // 外层 Box 只负责手势与定位（不做位移变换），里面的磁贴才跟着手指平移/放大。
-                                // 这样 pointerInput 收到的坐标不会被自己的变换反馈，拖起来不会跳。
-                                val dragModifier = Modifier
-                                    .onGloballyPositioned { subTileBounds[subKey] = it.boundsInRoot() }
-                                    .pointerInput(subKey) {
-                                        fun menuAnchor(): Rect? = subTileBounds[subKey]?.let { Rect(it.topLeft, it.size) }
-                                        // point 已经换算到 item 偏移的坐标空间（info.offset + 手指在磁贴内的位置）。
-                                        fun itemAt(point: Offset): String? {
-                                            val keys = latestAlbums.value.map { it.bucketId }.toSet()
-                                            return albumGridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
-                                                info.key in keys &&
-                                                    point.x >= info.offset.x && point.x <= info.offset.x + info.size.width &&
-                                                    point.y >= info.offset.y && point.y <= info.offset.y + info.size.height
-                                            }?.key as? String
-                                        }
-                                        var lastSwapTarget: String? = null
-                                        detectDragGesturesAfterLongPress(
-                                            onDragStart = { pos ->
-                                                val info = albumGridState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == subKey }
-                                                    ?: return@detectDragGesturesAfterLongPress
-                                                val bounds = subTileBounds[subKey] ?: return@detectDragGesturesAfterLongPress
-                                                draggedSubKey = subKey
-                                                arrangedSub = latestAlbums.value
-                                                subGrab = pos
-                                                subPointerGrid = Offset(info.offset.x + pos.x, info.offset.y + pos.y)
-                                                subPointerRoot = bounds.topLeft + pos
-                                                subStartRoot = subPointerRoot
-                                                subMoved = false
-                                                lastSwapTarget = null
-                                                subLongPressAt = android.os.SystemClock.elapsedRealtime()
-                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            },
-                                            onDrag = { change, amount ->
-                                                if (draggedSubKey != subKey) return@detectDragGesturesAfterLongPress
-                                                change.consume()
-                                                subPointerGrid += amount
-                                                subPointerRoot += amount
-                                                if (!subMoved && (subPointerRoot - subStartRoot).getDistance() > viewConfiguration.touchSlop) {
-                                                    subMoved = true
-                                                }
-                                                if (!subMoved) return@detectDragGesturesAfterLongPress
-                                                val target = itemAt(subPointerGrid)
-                                                val current = arrangedSub ?: latestAlbums.value
-                                                if (target != null && target != subKey && target != lastSwapTarget) {
-                                                    val from = current.indexOfFirst { it.bucketId == subKey }
-                                                    val to = current.indexOfFirst { it.bucketId == target }
-                                                    if (from >= 0 && to >= 0 && from != to) {
-                                                        arrangedSub = current.toMutableList().apply { add(to, removeAt(from)) }
-                                                        lastSwapTarget = target
-                                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                    }
-                                                }
-                                                // 靠近上下边缘自动滚动。
-                                                val edge = 90.dp.toPx()
-                                                val height = albumGridState.layoutInfo.viewportSize.height
-                                                val gridY = subPointerRoot.y - gridOriginInRoot.y
-                                                val scroll = when {
-                                                    gridY < edge -> -18f
-                                                    gridY > height - edge -> 18f
-                                                    else -> 0f
-                                                }
-                                                if (scroll != 0f) coroutineScope.launch { albumGridState.scrollBy(scroll) }
-                                            },
-                                            onDragEnd = {
-                                                val moved = subMoved
-                                                val order = arrangedSub
-                                                val anchor = menuAnchor()
-                                                draggedSubKey = null
-                                                subMoved = false
-                                                if (moved && order != null) {
-                                                    onReorderSubAlbums(order.map { it.bucketId })
-                                                } else {
-                                                    arrangedSub = null
-                                                    if (!moved) openAlbumActions(subAlbum, anchor)
-                                                }
-                                            },
-                                            onDragCancel = {
-                                                if (draggedSubKey != subKey) return@detectDragGesturesAfterLongPress
-                                                val wasDrag = subMoved
-                                                val anchor = menuAnchor()
-                                                draggedSubKey = null
-                                                subMoved = false
-                                                arrangedSub = null
-                                                if (!wasDrag) openAlbumActions(subAlbum, anchor)
-                                            }
-                                        )
-                                    }
-                                Box(
-                                    modifier = dragModifier.then(if (dragged) Modifier.zIndex(1f) else Modifier.animateItem())
+                            // 子相册用「多行 + 每行 subColumns 个」的布局：它的大小由 subColumns 单独控制，
+                            // 和照片网格的列数（albumPhotoColumns）互不影响。
+                            item(span = { GridItemSpan(maxLineSpan) }, key = "sub_albums") {
+                                Column(
+                                    modifier = drawerShift
+                                        .padding(horizontal = sectionInset, vertical = 4.dp)
+                                        .onGloballyPositioned { subAlbumsBoundsRoot = it.boundsInRoot() },
+                                    verticalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
-                                    AlbumTile(
-                                        album = subAlbum,
-                                        onClick = {
-                                            // 长按/拖动松手后的那次点击不算点击，免得同时打开相册。
-                                            if (draggedSubKey != null) return@AlbumTile
-                                            if (android.os.SystemClock.elapsedRealtime() - subLongPressAt < 800L) return@AlbumTile
-                                            onAlbumClick(subAlbum)
-                                        },
-                                        // 长按由上面的拖拽手势处理（不移动 = 菜单，移动 = 排序）。
-                                        onLongClick = null,
-                                        compact = true,
-                                        modifier = drawerShift
-                                            .padding(start = sectionInset, end = sectionInset, top = 2.dp, bottom = 2.dp)
-                                            .then(
-                                                if (dragged) {
-                                                    Modifier.graphicsLayer {
-                                                        val info = albumGridState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == subKey }
-                                                        if (info != null) {
-                                                            translationX = subPointerGrid.x - subGrab.x - info.offset.x
-                                                            translationY = subPointerGrid.y - subGrab.y - info.offset.y
-                                                        }
-                                                        scaleX = 1.06f
-                                                        scaleY = 1.06f
+                                    (arrangedSub ?: albums).chunked(subColumns).forEach { rowAlbums ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(if (subColumns >= 4) 8.dp else 10.dp)
+                                        ) {
+                                            rowAlbums.forEach { subAlbum ->
+                                                val subKey = subAlbum.bucketId
+                                                val dragged = draggedSubKey == subKey
+                                                // 外层不跟随手指（pointerInput 用干净坐标），内层才做位移/放大。
+                                                val dragModifier = Modifier
+                                                    .weight(1f)
+                                                    .onGloballyPositioned { subTileBounds[subKey] = it.boundsInRoot() }
+                                                    .pointerInput(subKey) {
+                                                        fun menuAnchor(): Rect? = subTileBounds[subKey]?.let { Rect(it.topLeft, it.size) }
+                                                        var lastSwapTarget: String? = null
+                                                        detectDragGesturesAfterLongPress(
+                                                            onDragStart = { pos ->
+                                                                val bounds = subTileBounds[subKey] ?: return@detectDragGesturesAfterLongPress
+                                                                draggedSubKey = subKey
+                                                                arrangedSub = latestAlbums.value
+                                                                subStartRoot = bounds.topLeft + pos
+                                                                subPointerRoot = subStartRoot
+                                                                subMoved = false
+                                                                lastSwapTarget = null
+                                                                subLongPressAt = android.os.SystemClock.elapsedRealtime()
+                                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                            },
+                                                            onDrag = { change, amount ->
+                                                                if (draggedSubKey != subKey) return@detectDragGesturesAfterLongPress
+                                                                change.consume()
+                                                                subPointerRoot += amount
+                                                                if (!subMoved && (subPointerRoot - subStartRoot).getDistance() > viewConfiguration.touchSlop) {
+                                                                    subMoved = true
+                                                                }
+                                                                if (!subMoved) return@detectDragGesturesAfterLongPress
+                                                                val target = subTileBounds.entries
+                                                                    .firstOrNull { (k, r) -> k != subKey && r.contains(subPointerRoot) }?.key
+                                                                val current = arrangedSub ?: latestAlbums.value
+                                                                if (target != null && target != lastSwapTarget) {
+                                                                    val from = current.indexOfFirst { it.bucketId == subKey }
+                                                                    val to = current.indexOfFirst { it.bucketId == target }
+                                                                    if (from >= 0 && to >= 0 && from != to) {
+                                                                        arrangedSub = current.toMutableList().apply { add(to, removeAt(from)) }
+                                                                        lastSwapTarget = target
+                                                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                    }
+                                                                }
+                                                                // 靠近上下边缘自动滚动。
+                                                                val edge = 90.dp.toPx()
+                                                                val gridY = subPointerRoot.y - gridOriginInRoot.y
+                                                                val height = albumGridState.layoutInfo.viewportSize.height
+                                                                val scroll = when {
+                                                                    gridY < edge -> -18f
+                                                                    gridY > height - edge -> 18f
+                                                                    else -> 0f
+                                                                }
+                                                                if (scroll != 0f) coroutineScope.launch { albumGridState.scrollBy(scroll) }
+                                                            },
+                                                            onDragEnd = {
+                                                                val moved = subMoved
+                                                                val order = arrangedSub
+                                                                val anchor = menuAnchor()
+                                                                draggedSubKey = null
+                                                                subMoved = false
+                                                                if (moved && order != null) {
+                                                                    onReorderSubAlbums(order.map { it.bucketId })
+                                                                } else {
+                                                                    arrangedSub = null
+                                                                    if (!moved) openAlbumActions(subAlbum, anchor)
+                                                                }
+                                                            },
+                                                            onDragCancel = {
+                                                                if (draggedSubKey != subKey) return@detectDragGesturesAfterLongPress
+                                                                val wasDrag = subMoved
+                                                                val anchor = menuAnchor()
+                                                                draggedSubKey = null
+                                                                subMoved = false
+                                                                arrangedSub = null
+                                                                if (!wasDrag) openAlbumActions(subAlbum, anchor)
+                                                            }
+                                                        )
                                                     }
-                                                } else {
-                                                    Modifier
+                                                Box(modifier = dragModifier) {
+                                                    AlbumTile(
+                                                        album = subAlbum,
+                                                        onClick = {
+                                                            // 长按/拖动松手后的那次点击不算点击，免得同时打开相册。
+                                                            if (draggedSubKey != null) return@AlbumTile
+                                                            if (android.os.SystemClock.elapsedRealtime() - subLongPressAt < 800L) return@AlbumTile
+                                                            onAlbumClick(subAlbum)
+                                                        },
+                                                        // 长按由上面的拖拽手势处理（不移动 = 菜单，移动 = 排序）。
+                                                        onLongClick = null,
+                                                        compact = true,
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .then(
+                                                                if (dragged) {
+                                                                    Modifier.graphicsLayer {
+                                                                        translationX = subPointerRoot.x - subStartRoot.x
+                                                                        translationY = subPointerRoot.y - subStartRoot.y
+                                                                        scaleX = 1.06f
+                                                                        scaleY = 1.06f
+                                                                    }
+                                                                } else {
+                                                                    Modifier
+                                                                }
+                                                            )
+                                                    )
                                                 }
-                                            )
-                                    )
+                                            }
+                                            repeat(subColumns - rowAlbums.size) {
+                                                Spacer(modifier = Modifier.weight(1f))
+                                            }
+                                        }
+                                    }
                                 }
-                                }
+                            }
                         }
-
                         if (albumMedia.isNotEmpty()) {
                             if (albums.isNotEmpty()) {
                                 item(span = { GridItemSpan(maxLineSpan) }, key = "album_media_title") {
@@ -1446,6 +1466,12 @@ fun AlbumsScreen(
                 )
             }
 
+            GridScrollbar(
+                state = albumGridState,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(top = statusBarTop + 80.dp, bottom = bottomBarContentPadding(20.dp))
+            )
         }
 
         // One UI: the other albums in a single column at the left edge, revealed by swiping right.
@@ -1478,9 +1504,48 @@ fun AlbumsScreen(
         // Preserves scroll position of album media when returning
         val detailIndexHolder = remember { IntArray(1) }
         selectedDetailIndex?.let { detailIndexHolder[0] = it }
+        // 下拉松手关闭时，缩放动画从这里记录的当前变换继续（由 MediaDetailScreen 写入）。
+        var pendingZoomStart by remember { mutableStateOf<FloatArray?>(null) }
+        // 大图里每翻一张，网格就跟着滚一点：退出的缩放动画正好落在那张缩略图上。
+        // 刚点开的那一下不要滚（照片本来就在屏幕上），否则打开动画期间网格会突然跳一下。
+        var lastSyncIndex by remember { mutableStateOf(-1) }
+        LaunchedEffect(selectedDetailIndex) {
+            val idx = selectedDetailIndex
+            if (idx == null) { lastSyncIndex = -1; return@LaunchedEffect }
+            if (lastSyncIndex == -1) { lastSyncIndex = idx; return@LaunchedEffect }
+            if (idx == lastSyncIndex) return@LaunchedEffect
+            lastSyncIndex = idx
+            if (isInsideAlbum && albumMedia.isNotEmpty()) {
+                // 媒体网格前面还有：hero/breadcrumbs/子相册标题/子相册/媒体标题这些整行 item。
+                var mediaStart = 0
+                if (iosAlbumHero && currentAlbum != null) mediaStart++
+                if (oneUiAlbumHero && currentAlbum != null) mediaStart++
+                if (breadcrumbs.size > 1) mediaStart++
+                if (albums.isNotEmpty()) mediaStart += 3
+                val target = mediaStart + idx
+                // 让看过的那张大致落在屏幕中间：往上多留两行。
+                val columns = albumPhotoColumns.coerceAtLeast(1)
+                val anchor = (target - columns * 2).coerceAtLeast(0)
+                val last = (albumGridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                albumGridState.scrollToItem(anchor.coerceIn(0, last))
+            }
+        }
+        // 当前正在看的那张缩略图在屏幕上的实际位置（关闭时缩放动画要落到它上面）。
+        val currentMediaTileBounds: () -> Rect? = {
+            val idx = detailIndexHolder[0]
+            val item = albumMedia.getOrNull(idx)
+            val li = albumGridState.layoutInfo
+            val info = item?.let { media -> li.visibleItemsInfo.firstOrNull { it.key == media.id } }
+            if (info == null) null else Rect(
+                gridOriginInRoot + Offset(info.offset.x.toFloat(), info.offset.y.toFloat() - li.viewportStartOffset),
+                androidx.compose.ui.geometry.Size(info.size.width.toFloat(), info.size.height.toFloat())
+            )
+        }
         MediaZoomTransition(
             visible = selectedDetailIndex != null,
-            onCoveringChange = { gridCoveredByViewer = it }
+            onCoveringChange = { gridCoveredByViewer = it },
+            closeBounds = currentMediaTileBounds,
+            closeStart = { pendingZoomStart.also { pendingZoomStart = null } }
         ) {
                 MediaDetailScreen(
                     mediaList = displayAlbumMedia,
@@ -1490,7 +1555,11 @@ fun AlbumsScreen(
                     onRenameItem = onRenameItem,
                     isFavorite = isFavorite,
                     onToggleFavorite = onToggleFavorite,
-                    onPageChanged = onDetailIndexChanged
+                    onPageChanged = onDetailIndexChanged,
+                    onZoomDismiss = { s, tx, ty ->
+                        pendingZoomStart = floatArrayOf(s, tx, ty)
+                        onCloseDetail()
+                    }
                 )
         }
     }
