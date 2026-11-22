@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 由 Android 自己显示（壁纸选择器、小组件列表）的中文文案。
+         应用名沿用品牌名 Prism Gallery，与 values/strings.xml 一致，故意不覆盖。 -->
+    <string name="live_wallpaper_description">你在 Prism Gallery 中选择的视频或 GIF</string>
+    <string name="slideshow_wallpaper_label">Prism 幻灯片</string>
+    <string name="slideshow_wallpaper_description">你在 Prism Gallery 中选择的相册里的照片，每隔几分钟更换</string>
+    <string name="photo_widget_label">Prism 照片</string>
+    <string name="photo_widget_description">来自你收藏的照片，每小时更换</string>
+</resources>

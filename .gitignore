@@ -1,0 +1,29 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+app/build/
+app/release/
+
+# Release signing (the key itself lives outside the repository)
+keystore.properties
+*.jks
+*.keystore
+
+# Local tooling and design references
+/.kotlin/
+/.claude/
+/Reference Images/
+
+# Local debugging dumps (logcat captures, pulled prefs)
+/log.txt
+/logcat*.txt
+/xml.xml
+*.apk
+testfiles/
