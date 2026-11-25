@@ -459,6 +459,10 @@ fun AlbumsScreen(
     var subStartRoot by remember { mutableStateOf(Offset.Zero) }
     // 拖动时磁贴相对起点的位移（只用于画面；命中用容器几何计算）。
     var subDragOffset by remember { mutableStateOf(Offset.Zero) }
+    // 子相册拖动：手指在容器内的位置（跟随手指用），以及按下时的起点。
+    var subDragPointer by remember { mutableStateOf<Offset?>(null) }
+    var subDragStartPointer by remember { mutableStateOf(Offset.Zero) }
+    var subDragLastTarget by remember { mutableStateOf(-1) }
     var subGrab by remember { mutableStateOf(Offset.Zero) }
     var subMoved by remember { mutableStateOf(false) }
     var subLongPressAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
@@ -1079,7 +1083,103 @@ fun AlbumsScreen(
                                 Column(
                                     modifier = drawerShift
                                         .padding(horizontal = sectionInset, vertical = 4.dp)
-                                        .onGloballyPositioned { subAlbumsBoundsRoot = it.boundsInRoot() },
+                                        .onGloballyPositioned { subAlbumsBoundsRoot = it.boundsInRoot() }
+                                        // 拖动排序的手势放在整个子相册容器上：重排子项时手势节点
+                                        // 不会被重组掉，所以可以边拖边让其它磁贴实时让位。
+                                        .pointerInput(Unit) {
+                                            fun hSpacingPx(): Float = if (subColumns >= 4) 8.dp.toPx() else 10.dp.toPx()
+                                            fun tileWidthPx(): Float {
+                                                val w = subAlbumsBoundsRoot?.width ?: size.width.toFloat()
+                                                val cols = subColumns.coerceAtLeast(1)
+                                                return ((w - hSpacingPx() * (cols - 1)) / cols).coerceAtLeast(1f)
+                                            }
+                                            fun indexAt(local: Offset): Int {
+                                                val cols = subColumns.coerceAtLeast(1)
+                                                val t = tileWidthPx()
+                                                val stride = t + 14.dp.toPx()
+                                                val row = (local.y / stride).toInt().coerceAtLeast(0)
+                                                val col = (local.x / (t + hSpacingPx())).toInt().coerceIn(0, cols - 1)
+                                                val list = arrangedSub ?: latestAlbums.value
+                                                return (row * cols + col).coerceIn(0, (list.size - 1).coerceAtLeast(0))
+                                            }
+                                            detectDragGesturesAfterLongPress(
+                                                onDragStart = { pos ->
+                                                    val list = arrangedSub ?: latestAlbums.value
+                                                    if (list.isEmpty()) return@detectDragGesturesAfterLongPress
+                                                    val idx = indexAt(pos)
+                                                    draggedSubKey = list.getOrNull(idx)?.bucketId
+                                                    arrangedSub = list
+                                                    subDragPointer = pos
+                                                    subDragStartPointer = pos
+                                                    subDragLastTarget = idx
+                                                    subDragOffset = Offset.Zero
+                                                    subMoved = false
+                                                    subLongPressAt = android.os.SystemClock.elapsedRealtime()
+                                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                },
+                                                onDrag = { change, amount ->
+                                                    val key = draggedSubKey ?: return@detectDragGesturesAfterLongPress
+                                                    change.consume()
+                                                    val p = (subDragPointer ?: subDragStartPointer) + amount
+                                                    subDragPointer = p
+                                                    subDragOffset += amount
+                                                    if (!subMoved && (p - subDragStartPointer).getDistance() > viewConfiguration.touchSlop) {
+                                                        subMoved = true
+                                                    }
+                                                    if (!subMoved) return@detectDragGesturesAfterLongPress
+                                                    val list = arrangedSub ?: latestAlbums.value
+                                                    val from = list.indexOfFirst { it.bucketId == key }
+                                                    val to = indexAt(p)
+                                                    if (from >= 0 && to != from && to != subDragLastTarget) {
+                                                        arrangedSub = list.toMutableList().apply { add(to, removeAt(from)) }
+                                                        subDragLastTarget = to
+                                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    }
+                                                    // 靠近上下边缘自动滚动。
+                                                    val edge = 90.dp.toPx()
+                                                    val rootP = (subAlbumsBoundsRoot?.topLeft ?: Offset.Zero) + p
+                                                    val gridY = rootP.y - gridOriginInRoot.y
+                                                    val height = albumGridState.layoutInfo.viewportSize.height
+                                                    val scroll = when {
+                                                        gridY < edge -> -18f
+                                                        gridY > height - edge -> 18f
+                                                        else -> 0f
+                                                    }
+                                                    if (scroll != 0f) coroutineScope.launch { albumGridState.scrollBy(scroll) }
+                                                },
+                                                onDragEnd = {
+                                                    val key = draggedSubKey
+                                                    val moved = subMoved
+                                                    val order = arrangedSub
+                                                    draggedSubKey = null
+                                                    subDragPointer = null
+                                                    subMoved = false
+                                                    subDragOffset = Offset.Zero
+                                                    subDragLastTarget = -1
+                                                    if (moved && order != null) {
+                                                        onReorderSubAlbums(order.map { it.bucketId })
+                                                    } else {
+                                                        arrangedSub = null
+                                                        val album = key?.let { k -> latestAlbums.value.firstOrNull { it.bucketId == k } }
+                                                        val anchor = key?.let { k -> subTileBounds[k]?.let { Rect(it.topLeft, it.size) } }
+                                                        if (album != null) openAlbumActions(album, anchor)
+                                                    }
+                                                },
+                                                onDragCancel = {
+                                                    val key = draggedSubKey
+                                                    val wasDrag = subMoved
+                                                    draggedSubKey = null
+                                                    subDragPointer = null
+                                                    subMoved = false
+                                                    subDragOffset = Offset.Zero
+                                                    subDragLastTarget = -1
+                                                    arrangedSub = null
+                                                    val album = key?.let { k -> latestAlbums.value.firstOrNull { it.bucketId == k } }
+                                                    val anchor = key?.let { k -> subTileBounds[k]?.let { Rect(it.topLeft, it.size) } }
+                                                    if (!wasDrag && album != null) openAlbumActions(album, anchor)
+                                                }
+                                            )
+                                        },
                                     verticalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
                                     (arrangedSub ?: albums).chunked(subColumns).forEach { rowAlbums ->
@@ -1094,101 +1194,7 @@ fun AlbumsScreen(
                                                 val dragModifier = Modifier
                                                     .weight(1f)
                                                     .onGloballyPositioned { subTileBounds[subKey] = it.boundsInRoot() }
-                                                    .pointerInput(subKey) {
-                                                        fun menuAnchor(): Rect? = subTileBounds[subKey]?.let { Rect(it.topLeft, it.size) }
-                                                        var lastSwapTargetIndex: Int = -1
-                                                        var pendingTarget: Int = -1
-                                                        detectDragGesturesAfterLongPress(
-                                                            onDragStart = { pos ->
-                                                                val bounds = subTileBounds[subKey]
-                                                                if (bounds == null) return@detectDragGesturesAfterLongPress
-                                                                draggedSubKey = subKey
-                                                                arrangedSub = latestAlbums.value
-                                                                subStartRoot = bounds.topLeft + pos
-                                                                subPointerRoot = subStartRoot
-                                                                subDragOffset = Offset.Zero
-                                                                subMoved = false
-                                                                lastSwapTargetIndex = -1
-                                                                pendingTarget = -1
-                                                                subLongPressAt = android.os.SystemClock.elapsedRealtime()
-                                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                            },
-                                                            onDrag = { change, amount ->
-                                                                if (draggedSubKey != subKey) return@detectDragGesturesAfterLongPress
-                                                                change.consume()
-                                                                subDragOffset += amount
-                                                                subPointerRoot = subStartRoot + subDragOffset
-                                                                if (!subMoved && (subPointerRoot - subStartRoot).getDistance() > viewConfiguration.touchSlop) {
-                                                                    subMoved = true
-                                                                }
-                                                                if (!subMoved) return@detectDragGesturesAfterLongPress
-                                                                // 用「子相册容器」的几何算目标位置：行高 = 磁贴宽 + 14dp 行距，
-                                                                // 不依赖每块磁贴的回调坐标，换机器也不会失准。
-                                                                val holder = subAlbumsBoundsRoot
-                                                                val cols = subColumns.coerceAtLeast(1)
-                                                                val current = arrangedSub ?: latestAlbums.value
-                                                                if (holder != null && holder.width > 0f && holder.height > 0f && current.isNotEmpty()) {
-                                                                    val hSpacing = (if (cols >= 4) 8.dp else 10.dp).toPx()
-                                                                    val tileSize = ((holder.width - hSpacing * (cols - 1)) / cols).coerceAtLeast(1f)
-                                                                    val rowStride = tileSize + 14.dp.toPx()
-                                                                    val localY = (subPointerRoot.y - holder.top).coerceIn(0f, holder.height - 1f)
-                                                                    val localX = (subPointerRoot.x - holder.left).coerceIn(0f, holder.width - 1f)
-                                                                    val row = (localY / rowStride).toInt()
-                                                                    val col = (localX / (tileSize + hSpacing)).toInt().coerceIn(0, cols - 1)
-                                                                    val to = (row * cols + col).coerceIn(0, current.lastIndex)
-                                                                    val from = current.indexOfFirst { it.bucketId == subKey }
-                                                                    pendingTarget = to
-                                                                    if (from >= 0 && to != from && to != lastSwapTargetIndex) {
-                                                                        lastSwapTargetIndex = to
-                                                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                                    }
-                                                                }
-                                                                // 靠近上下边缘自动滚动。
-                                                                val edge = 90.dp.toPx()
-                                                                val gridY = subPointerRoot.y - gridOriginInRoot.y
-                                                                val height = albumGridState.layoutInfo.viewportSize.height
-                                                                val scroll = when {
-                                                                    gridY < edge -> -18f
-                                                                    gridY > height - edge -> 18f
-                                                                    else -> 0f
-                                                                }
-                                                                if (scroll != 0f) coroutineScope.launch { albumGridState.scrollBy(scroll) }
-                                                            },
-                                                            onDragEnd = {
-                                                                val moved = subMoved
-                                                                val anchor = menuAnchor()
-                                                                val base = latestAlbums.value
-                                                                val from = base.indexOfFirst { it.bucketId == subKey }
-                                                                val to = pendingTarget.coerceIn(0, (base.size - 1).coerceAtLeast(0))
-                                                                val order = if (moved && from >= 0 && to != from) {
-                                                                    base.toMutableList().apply { add(to, removeAt(from)) }
-                                                                } else null
-                                                                draggedSubKey = null
-                                                                subMoved = false
-                                                                subDragOffset = Offset.Zero
-                                                                pendingTarget = -1
-                                                                if (moved && order != null) {
-                                                                    arrangedSub = order
-                                                                    onReorderSubAlbums(order.map { it.bucketId })
-                                                                } else {
-                                                                    arrangedSub = null
-                                                                    if (!moved) openAlbumActions(subAlbum, anchor)
-                                                                }
-                                                            },
-                                                            onDragCancel = {
-                                                                if (draggedSubKey != subKey) return@detectDragGesturesAfterLongPress
-                                                                val wasDrag = subMoved
-                                                                val anchor = menuAnchor()
-                                                                draggedSubKey = null
-                                                                subMoved = false
-                                                                subDragOffset = Offset.Zero
-                                                                arrangedSub = null
-                                                                pendingTarget = -1
-                                                                if (!wasDrag) openAlbumActions(subAlbum, anchor)
-                                                            }
-                                                        )
-                                                    }
-                                                Box(modifier = dragModifier) {
+                                                    Box(modifier = dragModifier) {
                                                     AlbumTile(
                                                         album = subAlbum,
                                                         onClick = {
@@ -1205,8 +1211,19 @@ fun AlbumsScreen(
                                                             .then(
                                                                 if (dragged) {
                                                                     Modifier.graphicsLayer {
-                                                                        translationX = subDragOffset.x
-                                                                        translationY = subDragOffset.y
+                                                                        val p = subDragPointer
+                                                                        if (p != null) {
+                                                                            val cols = subColumns.coerceAtLeast(1)
+                                                                            val list = arrangedSub ?: latestAlbums.value
+                                                                            val idx = list.indexOfFirst { it.bucketId == subKey }
+                                                                            if (idx >= 0) {
+                                                                                val hSp = if (cols >= 4) 8.dp.toPx() else 10.dp.toPx()
+                                                                                // 它现在所在的格子位置可能会变（别的磁贴让位了），
+                                                                                // 用格子左上角反推位移，磁贴才能一直贴住手指。
+                                                                                translationX = p.x - (idx % cols) * (size.width + hSp)
+                                                                                translationY = p.y - (idx / cols) * (size.height + 14.dp.toPx())
+                                                                            }
+                                                                        }
                                                                         scaleX = 1.06f
                                                                         scaleY = 1.06f
                                                                     }
