@@ -463,6 +463,8 @@ fun AlbumsScreen(
     var subDragPointer by remember { mutableStateOf<Offset?>(null) }
     var subDragStartPointer by remember { mutableStateOf(Offset.Zero) }
     var subDragLastTarget by remember { mutableStateOf(-1) }
+    // 按下点在磁贴里的偏移：长按的瞬间不能让磁贴跳到手指左上角。
+    var subDragGrab by remember { mutableStateOf(Offset.Zero) }
     var subGrab by remember { mutableStateOf(Offset.Zero) }
     var subMoved by remember { mutableStateOf(false) }
     var subLongPressAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
@@ -1107,8 +1109,13 @@ fun AlbumsScreen(
                                                     val list = arrangedSub ?: latestAlbums.value
                                                     if (list.isEmpty()) return@detectDragGesturesAfterLongPress
                                                     val idx = indexAt(pos)
-                                                    draggedSubKey = list.getOrNull(idx)?.bucketId
+                                                    val key = list.getOrNull(idx)?.bucketId
+                                                    draggedSubKey = key
                                                     arrangedSub = list
+                                                    // 记录手指相对这块磁贴左上角的位置，拖动位移按它补偿。
+                                                    val b = key?.let { subTileBounds[it] }
+                                                    val c0 = subAlbumsBoundsRoot
+                                                    subDragGrab = if (b != null && c0 != null) pos - (b.topLeft - c0.topLeft) else Offset.Zero
                                                     subDragPointer = pos
                                                     subDragStartPointer = pos
                                                     subDragLastTarget = idx
@@ -1156,6 +1163,7 @@ fun AlbumsScreen(
                                                     subMoved = false
                                                     subDragOffset = Offset.Zero
                                                     subDragLastTarget = -1
+                                                    subDragGrab = Offset.Zero
                                                     if (moved && order != null) {
                                                         onReorderSubAlbums(order.map { it.bucketId })
                                                     } else {
@@ -1173,6 +1181,7 @@ fun AlbumsScreen(
                                                     subMoved = false
                                                     subDragOffset = Offset.Zero
                                                     subDragLastTarget = -1
+                                                    subDragGrab = Offset.Zero
                                                     arrangedSub = null
                                                     val album = key?.let { k -> latestAlbums.value.firstOrNull { it.bucketId == k } }
                                                     val anchor = key?.let { k -> subTileBounds[k]?.let { Rect(it.topLeft, it.size) } }
@@ -1212,17 +1221,14 @@ fun AlbumsScreen(
                                                                 if (dragged) {
                                                                     Modifier.graphicsLayer {
                                                                         val p = subDragPointer
-                                                                        if (p != null) {
-                                                                            val cols = subColumns.coerceAtLeast(1)
-                                                                            val list = arrangedSub ?: latestAlbums.value
-                                                                            val idx = list.indexOfFirst { it.bucketId == subKey }
-                                                                            if (idx >= 0) {
-                                                                                val hSp = if (cols >= 4) 8.dp.toPx() else 10.dp.toPx()
-                                                                                // 它现在所在的格子位置可能会变（别的磁贴让位了），
-                                                                                // 用格子左上角反推位移，磁贴才能一直贴住手指。
-                                                                                translationX = p.x - (idx % cols) * (size.width + hSp)
-                                                                                translationY = p.y - (idx / cols) * (size.height + 14.dp.toPx())
-                                                                            }
+                                                                        val b = subTileBounds[subKey]
+                                                                        val holder = subAlbumsBoundsRoot
+                                                                        if (p != null && b != null && holder != null) {
+                                                                            // 磁贴当前所在格子的左上角（相对容器），
+                                                                            // 减去按下时的抓取偏移，磁贴就一直贴住手指、长按不跳。
+                                                                            val slot = b.topLeft - holder.topLeft
+                                                                            translationX = p.x - subDragGrab.x - slot.x
+                                                                            translationY = p.y - subDragGrab.y - slot.y
                                                                         }
                                                                         scaleX = 1.06f
                                                                         scaleY = 1.06f
