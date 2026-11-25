@@ -215,6 +215,20 @@ fun MediaDetailScreen(
     var settleJob by remember { mutableStateOf<Job?>(null) }
     val context = LocalContext.current
 
+    // 预取当前页附近视频的缩略图：视频页在首帧之前靠它顶住画面，冷加载时就是黑的。
+    androidx.compose.runtime.LaunchedEffect(pagerState.currentPage, mediaList) {
+        val loader = coil3.SingletonImageLoader.get(context)
+        val idx = pagerState.currentPage
+        for (i in (idx - 2)..(idx + 2)) {
+            if (i !in mediaList.indices) continue
+            val item = mediaList[i]
+            if (!item.isVideo) continue
+            loader.enqueue(
+                com.example.amoledgallery.ui.components.videoThumbnailRequest(context, item)
+            )
+        }
+    }
+
     androidx.compose.runtime.LaunchedEffect(pagerState.currentPage) {
         isZoomed = false
         dismissOffset = 0f
@@ -619,6 +633,8 @@ fun MediaDetailScreen(
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
+                // 相邻页提前组合：翻到视频页时缩略图已经在加载/已加载，不会先露黑。
+                beyondViewportPageCount = 1,
                 key = { index -> mediaList[index].id }
             ) { page ->
                 val currentMedia = mediaList[page]

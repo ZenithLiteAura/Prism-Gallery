@@ -2,6 +2,8 @@ package com.example.amoledgallery.ui.components
 
 import android.view.TextureView
 import androidx.annotation.OptIn
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
@@ -23,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as Media3Item
 import androidx.media3.common.Player
@@ -171,6 +174,17 @@ class VideoController {
  * The picture is a TextureView: unlike the SurfaceView a PlayerView uses, it is drawn with the rest of the window, so
  * it follows the zoom and the pull-to-close, and the glass controls on top can blur it.
  */
+
+/**
+ * 视频缩略图的统一请求：显式 memoryCacheKey，让「预取」和「显示」命中同一份缓存，
+ * 翻页时缩略图能同帧画出来，不会先露出页面底色。
+ */
+internal fun videoThumbnailRequest(context: android.content.Context, item: MediaItem): coil3.request.ImageRequest =
+    coil3.request.ImageRequest.Builder(context)
+        .data(item.thumbnail)
+        .memoryCacheKey("vthumb-" + item.id + "-" + item.dateModified)
+        .build()
+
 @OptIn(UnstableApi::class)
 @Composable
 fun AmoledVideoPlayer(
@@ -183,23 +197,28 @@ fun AmoledVideoPlayer(
     onZoomChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     // From the file's own metadata until the decoder knows better.
     var aspect by remember(item.id) { mutableFloatStateOf(item.displayAspectRatio) }
     ZoomableBox(
-        modifier = modifier.background(Color.Black),
+        // 深灰而不是纯黑：缩略图没加载出来时也不会像「黑屏」。
+        modifier = modifier.background(Color(0xFF111114)),
         contentAspectRatio = aspect,
         onSingleTap = onTap,
         onZoomChange = onZoomChange
     ) {
+        // 缩略图始终垫在最底层：页面从「未激活」切到「激活」时这个节点不会重建，
+        // 翻页/起播的瞬间就不会露出底色（之前会黑 2-3 帧）。
+        AsyncImage(
+            model = remember(item.id, item.dateModified) { videoThumbnailRequest(context, item) },
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            placeholder = ColorPainter(Color(0xFF111114)),
+            error = ColorPainter(Color(0xFF111114)),
+            modifier = Modifier.fillMaxSize()
+        )
         if (isActivePage) {
             ActiveVideoPlayer(item, controller, controlsVisible, aspect) { aspect = it }
-        } else {
-            AsyncImage(
-                model = item.thumbnail ?: item.uri,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
-            )
         }
     }
 }
@@ -214,7 +233,13 @@ private fun ActiveVideoPlayer(
     onAspect: (Float) -> Unit
 ) {
     val context = LocalContext.current
-    var isFirstFrameRendered by remember { mutableStateOf(false) }
+    var isFirstFrameRendered by remember(item.uri) { mutableStateOf(false) }
+    // 首帧到了以后淡入（120ms），而不是硬切；缩略图在淡入完成前一直垫在下面。
+    val firstFrameAlpha by animateFloatAsState(
+        targetValue = if (isFirstFrameRendered) 1f else 0f,
+        animationSpec = tween(durationMillis = 120),
+        label = "video_first_frame"
+    )
     val exoPlayer = remember(item.uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(Media3Item.fromUri(item.uri))
@@ -283,19 +308,10 @@ private fun ActiveVideoPlayer(
             factory = { ctx -> TextureView(ctx).also { exoPlayer.setVideoTextureView(it) } },
             onRelease = { exoPlayer.clearVideoTextureView(it) },
             // 第一帧之前把 TextureView 透明：否则新页面的 Surface 会先黑一下，
-            // 切换视频时屏幕闪黑。下面的缩略图会一直顶到第一帧出现。
+            // 切换视频时屏幕闪黑。下面的缩略图会一直顶到第一帧淡入完成。
             modifier = (if (aspect > 0f) Modifier.aspectRatio(aspect) else Modifier.fillMaxSize())
-                .graphicsLayer { alpha = if (isFirstFrameRendered) 1f else 0f }
+                .graphicsLayer { alpha = firstFrameAlpha }
         )
 
-        // Instant preview thumbnail before first frame is rendered
-        if (!isFirstFrameRendered) {
-            AsyncImage(
-                model = item.thumbnail ?: item.uri,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
     }
 }
