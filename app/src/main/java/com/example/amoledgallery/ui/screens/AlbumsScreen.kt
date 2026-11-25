@@ -8,7 +8,10 @@ import androidx.compose.material.icons.automirrored.rounded.ViewList
 import com.example.amoledgallery.ui.i18n.strings
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -77,6 +80,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -465,6 +469,8 @@ fun AlbumsScreen(
     var subDragLastTarget by remember { mutableStateOf(-1) }
     // 按下点在磁贴里的偏移：长按的瞬间不能让磁贴跳到手指左上角。
     var subDragGrab by remember { mutableStateOf(Offset.Zero) }
+    // 子相册每个磁贴上一次所在的格子（相对容器），用来在顺序变化时滑过去。
+    val subLastSlots = remember { mutableStateMapOf<String, Offset>() }
     var subGrab by remember { mutableStateOf(Offset.Zero) }
     var subMoved by remember { mutableStateOf(false) }
     var subLongPressAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
@@ -1199,10 +1205,31 @@ fun AlbumsScreen(
                                             rowAlbums.forEach { subAlbum ->
                                                 val subKey = subAlbum.bucketId
                                                 val dragged = draggedSubKey == subKey
+                                                // 顺序变化时，其它磁贴从旧格子滑到新格子（而不是瞬间跳过去）。
+                                                val slide = remember(subKey) { Animatable(Offset.Zero, Offset.VectorConverter) }
+                                                var slideFrom by remember(subKey) { mutableStateOf<Offset?>(null) }
+                                                LaunchedEffect(slideFrom) {
+                                                    val from = slideFrom ?: return@LaunchedEffect
+                                                    slide.snapTo(from)
+                                                    slide.animateTo(Offset.Zero, tween(durationMillis = 180))
+                                                    slideFrom = null
+                                                }
                                                 // 外层不跟随手指（pointerInput 用干净坐标），内层才做位移/放大。
                                                 val dragModifier = Modifier
                                                     .weight(1f)
-                                                    .onGloballyPositioned { subTileBounds[subKey] = it.boundsInRoot() }
+                                                    .onGloballyPositioned {
+                                                        val b = it.boundsInRoot()
+                                                        subTileBounds[subKey] = b
+                                                        val holder = subAlbumsBoundsRoot
+                                                        if (holder != null) {
+                                                            val slot = b.topLeft - holder.topLeft
+                                                            val prev = subLastSlots[subKey]
+                                                            if (prev != null && prev != slot && draggedSubKey != subKey) {
+                                                                slideFrom = prev - slot
+                                                            }
+                                                            subLastSlots[subKey] = slot
+                                                        }
+                                                    }
                                                     Box(modifier = dragModifier) {
                                                     AlbumTile(
                                                         album = subAlbum,
@@ -1234,7 +1261,10 @@ fun AlbumsScreen(
                                                                         scaleY = 1.06f
                                                                     }
                                                                 } else {
-                                                                    Modifier
+                                                                    Modifier.graphicsLayer {
+                                                                        translationX = slide.value.x
+                                                                        translationY = slide.value.y
+                                                                    }
                                                                 }
                                                             )
                                                     )
