@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as Media3Item
 import androidx.media3.common.Player
@@ -281,7 +282,10 @@ private fun ActiveVideoPlayer(
         AndroidView(
             factory = { ctx -> TextureView(ctx).also { exoPlayer.setVideoTextureView(it) } },
             onRelease = { exoPlayer.clearVideoTextureView(it) },
-            modifier = if (aspect > 0f) Modifier.aspectRatio(aspect) else Modifier.fillMaxSize()
+            // 第一帧之前把 TextureView 透明：否则新页面的 Surface 会先黑一下，
+            // 切换视频时屏幕闪黑。下面的缩略图会一直顶到第一帧出现。
+            modifier = (if (aspect > 0f) Modifier.aspectRatio(aspect) else Modifier.fillMaxSize())
+                .graphicsLayer { alpha = if (isFirstFrameRendered) 1f else 0f }
         )
 
         // Instant preview thumbnail before first frame is rendered

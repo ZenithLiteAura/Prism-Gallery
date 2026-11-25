@@ -457,6 +457,8 @@ fun AlbumsScreen(
     var subPointerGrid by remember { mutableStateOf(Offset.Zero) }
     var subPointerRoot by remember { mutableStateOf(Offset.Zero) }
     var subStartRoot by remember { mutableStateOf(Offset.Zero) }
+    // 拖动时磁贴相对起点的位移（只用于画面；命中用容器几何计算）。
+    var subDragOffset by remember { mutableStateOf(Offset.Zero) }
     var subGrab by remember { mutableStateOf(Offset.Zero) }
     var subMoved by remember { mutableStateOf(false) }
     var subLongPressAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
@@ -1094,36 +1096,50 @@ fun AlbumsScreen(
                                                     .onGloballyPositioned { subTileBounds[subKey] = it.boundsInRoot() }
                                                     .pointerInput(subKey) {
                                                         fun menuAnchor(): Rect? = subTileBounds[subKey]?.let { Rect(it.topLeft, it.size) }
-                                                        var lastSwapTarget: String? = null
+                                                        var lastSwapTargetIndex: Int = -1
+                                                        var pendingTarget: Int = -1
                                                         detectDragGesturesAfterLongPress(
                                                             onDragStart = { pos ->
-                                                                val bounds = subTileBounds[subKey] ?: return@detectDragGesturesAfterLongPress
+                                                                val bounds = subTileBounds[subKey]
+                                                                if (bounds == null) return@detectDragGesturesAfterLongPress
                                                                 draggedSubKey = subKey
                                                                 arrangedSub = latestAlbums.value
                                                                 subStartRoot = bounds.topLeft + pos
                                                                 subPointerRoot = subStartRoot
+                                                                subDragOffset = Offset.Zero
                                                                 subMoved = false
-                                                                lastSwapTarget = null
+                                                                lastSwapTargetIndex = -1
+                                                                pendingTarget = -1
                                                                 subLongPressAt = android.os.SystemClock.elapsedRealtime()
                                                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                                             },
                                                             onDrag = { change, amount ->
                                                                 if (draggedSubKey != subKey) return@detectDragGesturesAfterLongPress
                                                                 change.consume()
-                                                                subPointerRoot += amount
+                                                                subDragOffset += amount
+                                                                subPointerRoot = subStartRoot + subDragOffset
                                                                 if (!subMoved && (subPointerRoot - subStartRoot).getDistance() > viewConfiguration.touchSlop) {
                                                                     subMoved = true
                                                                 }
                                                                 if (!subMoved) return@detectDragGesturesAfterLongPress
-                                                                val target = subTileBounds.entries
-                                                                    .firstOrNull { (k, r) -> k != subKey && r.contains(subPointerRoot) }?.key
+                                                                // 用「子相册容器」的几何算目标位置：行高 = 磁贴宽 + 14dp 行距，
+                                                                // 不依赖每块磁贴的回调坐标，换机器也不会失准。
+                                                                val holder = subAlbumsBoundsRoot
+                                                                val cols = subColumns.coerceAtLeast(1)
                                                                 val current = arrangedSub ?: latestAlbums.value
-                                                                if (target != null && target != lastSwapTarget) {
+                                                                if (holder != null && holder.width > 0f && holder.height > 0f && current.isNotEmpty()) {
+                                                                    val hSpacing = (if (cols >= 4) 8.dp else 10.dp).toPx()
+                                                                    val tileSize = ((holder.width - hSpacing * (cols - 1)) / cols).coerceAtLeast(1f)
+                                                                    val rowStride = tileSize + 14.dp.toPx()
+                                                                    val localY = (subPointerRoot.y - holder.top).coerceIn(0f, holder.height - 1f)
+                                                                    val localX = (subPointerRoot.x - holder.left).coerceIn(0f, holder.width - 1f)
+                                                                    val row = (localY / rowStride).toInt()
+                                                                    val col = (localX / (tileSize + hSpacing)).toInt().coerceIn(0, cols - 1)
+                                                                    val to = (row * cols + col).coerceIn(0, current.lastIndex)
                                                                     val from = current.indexOfFirst { it.bucketId == subKey }
-                                                                    val to = current.indexOfFirst { it.bucketId == target }
-                                                                    if (from >= 0 && to >= 0 && from != to) {
-                                                                        arrangedSub = current.toMutableList().apply { add(to, removeAt(from)) }
-                                                                        lastSwapTarget = target
+                                                                    pendingTarget = to
+                                                                    if (from >= 0 && to != from && to != lastSwapTargetIndex) {
+                                                                        lastSwapTargetIndex = to
                                                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                                                     }
                                                                 }
@@ -1140,11 +1156,19 @@ fun AlbumsScreen(
                                                             },
                                                             onDragEnd = {
                                                                 val moved = subMoved
-                                                                val order = arrangedSub
                                                                 val anchor = menuAnchor()
+                                                                val base = latestAlbums.value
+                                                                val from = base.indexOfFirst { it.bucketId == subKey }
+                                                                val to = pendingTarget.coerceIn(0, (base.size - 1).coerceAtLeast(0))
+                                                                val order = if (moved && from >= 0 && to != from) {
+                                                                    base.toMutableList().apply { add(to, removeAt(from)) }
+                                                                } else null
                                                                 draggedSubKey = null
                                                                 subMoved = false
+                                                                subDragOffset = Offset.Zero
+                                                                pendingTarget = -1
                                                                 if (moved && order != null) {
+                                                                    arrangedSub = order
                                                                     onReorderSubAlbums(order.map { it.bucketId })
                                                                 } else {
                                                                     arrangedSub = null
@@ -1157,7 +1181,9 @@ fun AlbumsScreen(
                                                                 val anchor = menuAnchor()
                                                                 draggedSubKey = null
                                                                 subMoved = false
+                                                                subDragOffset = Offset.Zero
                                                                 arrangedSub = null
+                                                                pendingTarget = -1
                                                                 if (!wasDrag) openAlbumActions(subAlbum, anchor)
                                                             }
                                                         )
@@ -1179,8 +1205,8 @@ fun AlbumsScreen(
                                                             .then(
                                                                 if (dragged) {
                                                                     Modifier.graphicsLayer {
-                                                                        translationX = subPointerRoot.x - subStartRoot.x
-                                                                        translationY = subPointerRoot.y - subStartRoot.y
+                                                                        translationX = subDragOffset.x
+                                                                        translationY = subDragOffset.y
                                                                         scaleX = 1.06f
                                                                         scaleY = 1.06f
                                                                     }
