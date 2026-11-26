@@ -23,8 +23,8 @@ internal object VideoFirstFrameCache {
     fun peek(item: MediaItem): Bitmap? = cache.get(keyOf(item))
 
     suspend fun load(context: Context, item: MediaItem): Bitmap? = withContext(Dispatchers.IO) {
-        // 动态照片（durationMs = 0）不是普通视频：它的"第一帧"不等于照片本身，保持用照片缩略图。
-        if (item.durationMs <= 0L) return@withContext null
+        // 动态照片（durationMs = 0）也走这里：它播放的是一段视频，同样要拿视频的第 0 帧，
+        // 否则预览和播放首帧对不上，翻到它/打开它会闪一下别的画面。
         val key = keyOf(item)
         cache.get(key)?.let { return@withContext it }
         synchronized(loading) {
