@@ -226,6 +226,8 @@ fun MediaDetailScreen(
             loader.enqueue(
                 com.example.amoledgallery.ui.components.videoThumbnailRequest(context, item)
             )
+            // 第一帧也顺手取好（带缓存），翻到它时预览和播放的第一帧一致。
+            com.example.amoledgallery.ui.components.VideoFirstFrameCache.load(context, item)
         }
     }
 

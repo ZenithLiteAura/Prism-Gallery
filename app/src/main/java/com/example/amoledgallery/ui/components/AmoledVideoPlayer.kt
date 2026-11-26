@@ -7,6 +7,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -22,6 +23,7 @@ import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.graphicsLayer
@@ -207,16 +209,34 @@ fun AmoledVideoPlayer(
         onSingleTap = onTap,
         onZoomChange = onZoomChange
     ) {
-        // 缩略图始终垫在最底层：页面从「未激活」切到「激活」时这个节点不会重建，
-        // 翻页/起播的瞬间就不会露出底色（之前会黑 2-3 帧）。
-        AsyncImage(
-            model = remember(item.id, item.dateModified) { videoThumbnailRequest(context, item) },
-            contentDescription = null,
-            contentScale = ContentScale.Fit,
-            placeholder = ColorPainter(Color(0xFF111114)),
-            error = ColorPainter(Color(0xFF111114)),
-            modifier = Modifier.fillMaxSize()
-        )
+        // 垫底的预览图：优先用「视频第一帧」（和真正播放的第一帧一致），
+        // 还没取到之前用系统缩略图顶着，不会露底色。
+        var firstFramePreview by remember(item.id, item.dateModified) {
+            mutableStateOf(VideoFirstFrameCache.peek(item))
+        }
+        LaunchedEffect(item.id, item.dateModified) {
+            if (firstFramePreview == null) {
+                firstFramePreview = VideoFirstFrameCache.load(context, item)
+            }
+        }
+        val previewBitmap = firstFramePreview
+        if (previewBitmap != null) {
+            Image(
+                bitmap = previewBitmap.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            AsyncImage(
+                model = remember(item.id, item.dateModified) { videoThumbnailRequest(context, item) },
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                placeholder = ColorPainter(Color(0xFF111114)),
+                error = ColorPainter(Color(0xFF111114)),
+                modifier = Modifier.fillMaxSize()
+            )
+        }
         if (isActivePage) {
             ActiveVideoPlayer(item, controller, controlsVisible, aspect) { aspect = it }
         }
